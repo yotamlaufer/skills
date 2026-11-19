@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+# Pages built while testing a skill
+*.html
+.claude/

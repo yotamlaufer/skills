@@ -1,0 +1,32 @@
+{
+  "name": "yotamlaufer-skills",
+  "owner": {
+    "name": "yotamlaufer",
+    "url": "https://github.com/yotamlaufer"
+  },
+  "metadata": {
+    "description": "Agent skills by yotamlaufer: guided code review, and more to come."
+  },
+  "plugins": [
+    {
+      "name": "guided-review",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/guided-review"
+      ],
+      "description": "Read a pull request in chapters, with Explain and comments answered on the page by a review session of its own.",
+      "version": "1.0.0",
+      "license": "MIT",
+      "homepage": "https://github.com/yotamlaufer/skills/tree/main/skills/guided-review",
+      "repository": "https://github.com/yotamlaufer/skills",
+      "keywords": [
+        "code-review",
+        "pull-request",
+        "diff",
+        "walkthrough"
+      ],
+      "category": "development"
+    }
+  ]
+}
