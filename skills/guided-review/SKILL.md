@@ -4,7 +4,7 @@ description: Guided review of a code change — orders a diff (uncommitted work,
 license: MIT
 compatibility: Built for Claude Code in the Claude desktop app, which publishes the page as a claude.ai Artifact (comments and store capabilities) and starts the review session. Needs git, Node.js 22+, and the GitHub CLI for pull requests.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 A guided review is a reading order for a change: the heart of it first, its consequences next, the glue last, each chapter with a short overview and the real diff it covers. The page has three tabs: **Overview** (the change as analysed from the code: what it does, what changed, its risks), **Guide** (one chapter at a time, its words beside its diffs) and **Files** (every file whole, in patch order). `scripts/render.mjs` draws every diff line from the patch itself, so the page shows the change exactly; the order and the prose are yours, in `guide.json`.
@@ -102,7 +102,8 @@ Read every hunk, then the code each hunk depends on: the function it sits in, th
       "title": "One idea a reviewer can hold",
       "overview": "What this chapter changes, why, and what to check in it.",
       "files": [
-        { "path": "src/a.ts", "summary": "What changed in this file, in one line", "attention": "high", "kind": "interface", "affects": "Every caller of parseOrder; an order without a currency now fails" },
+        { "path": "src/a.ts", "summary": "What changed in this file, in one line", "attention": "high", "kind": "interface", "affects": "Every caller of parseOrder; an order without a currency now fails",
+          "flags": [{ "from": "n42", "to": "n44", "level": "high", "note": "The currency check is gone: an order without one now reaches the ledger." }] },
         { "path": "src/b.ts", "summary": "…", "hunks": [0, 2] },
         { "path": "yarn.lock", "summary": "…", "collapsed": true }
       ]
@@ -124,7 +125,12 @@ Read every hunk, then the code each hunk depends on: the function it sits in, th
   - `low`: mechanical or self-contained: a rename, docs, a test that mirrors the code, a config value, generated output. Skim it.
 - **`kind`**: what sort of change it is: `logic` (what the code does), `interface` (a signature, schema, type or API callers depend on), `data` (a stored format, a migration, seed data), `config`, `test`, `docs`, `refactor` (moves or renames with no change in behaviour), or `generated`.
 - **`affects`**: the blast radius in one line: who or what depends on this file's change, and what breaks if it is wrong (`"Every order the API accepts is parsed by it; a bad enum rejects whole orders"`). Set it for `high` and `medium` files; leave it out where nothing outside the file depends on it.
+- **`flags`**: the lines a reviewer must stop at, each shown open under its lines, with a bar beside them, and linked from the Overview's Risks and the chapter's column. A flag is the place where the file's risk lives: the line that, if wrong, breaks what `affects` names. Set a few per change, so each one stops the reader, never one per hunk.
+  - `from` and `to` (`to` defaults to `from`) are the first and last line, each a changed line in the same hunk, addressed like the page's answers: `n42` is new line 42, `o40` removed line 40. `node <skill dir>/scripts/render.mjs --list patch.diff <path>` prints a file's changed lines with these addresses.
+  - `level` is `high` (wrong here breaks something others rely on) or `medium` (worth stopping at; its reach stays close). A file with a `high` flag is a `high`-attention file, and a `medium` flag needs at least `medium`; there are no low flags.
+  - `note` is one or two sentences: what breaks, or what to verify, if these lines are wrong. Never what the lines say; the reader can see that.
+  - What a flag says stays out of `risks` and `affects`, so the Overview says it once.
 - **`hunks`** (0-based, in patch order) splits one file across chapters when its hunks serve different ideas; leave it out to take the whole file. `node <skill dir>/scripts/render.mjs --list patch.diff` prints every file with its hunks numbered this way, each with its first changed line.
 - **`title`** is a name for the page, a short noun phrase, with no explanation after a dash or colon.
 
-Every hunk of the patch goes in exactly one chapter. The renderer exits 1 with each mismatch spelled out (a path not in the patch, a hunk in two chapters, a hunk in none); fix `guide.json` and run it again.
+Every hunk of the patch goes in exactly one chapter. The renderer exits 1 with each mismatch spelled out (a path not in the patch, a hunk in two chapters, a hunk in none, a flag off the lines its chapter shows or above its file's attention); fix `guide.json` and run it again.

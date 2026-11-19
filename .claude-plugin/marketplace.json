@@ -16,7 +16,7 @@
         "./skills/guided-review"
       ],
       "description": "Read a pull request in chapters, with Explain and comments answered on the page by a review session of its own.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "license": "MIT",
       "homepage": "https://github.com/yotamlaufer/skills/tree/main/skills/guided-review",
       "repository": "https://github.com/yotamlaufer/skills",
