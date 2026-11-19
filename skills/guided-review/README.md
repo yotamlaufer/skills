@@ -4,7 +4,7 @@ Read a code change in the order that makes sense, not the order the diff happens
 
 `guided-review` turns a pull request, a branch, or your uncommitted work into a private page with three tabs:
 
-- **Overview**: the change as analysed from the code. What it does, what changed (each linked to its chapter), the risks (the files that need the closest reading and what they affect, plus anything cross-cutting), and the totals at a glance.
+- **Overview**: the change as analysed from the code. What it does, what changed (each linked to its chapter), the risks (the files that need the closest reading, what they affect and the exact lines to stop at, plus anything cross-cutting), and the totals at a glance.
 - **Guide**: the change in chapters, one at a time: the heart of it first, what follows from it next, the wiring last. Each chapter's overview and file list stay in a column beside its diffs.
 - **Files**: every changed file whole, in patch order, as the diff lists it.
 
@@ -49,6 +49,7 @@ What happens:
 | Read the guide | Pick a chapter in the strip under the tabs, or use **Previous** and **Next** |
 | See every changed file | **Files changed** on the Overview lists them all, highest attention first, with lines added and removed and the chapters they're in |
 | Know where to look hard | Each file carries an **attention** tag (High, Medium, Low), the **kind** of change (Interface, Logic, Data, Config, Tests, Docs, Refactor, Generated) and an **Affects** line naming its blast radius. Rest the pointer on a tag for its meaning |
+| Find the lines to stop at | **Flagged lines** carry a red (High) or amber (Medium) bar, with a note open under them saying what breaks if they're wrong. **Hide** folds a note. The Overview's **Risks** and each chapter's **Read closely** list link to every flag, and ⚑ in a file list counts a file's flags |
 | Jump to a file | Click it in any file list, or a risk's file name |
 | Track your progress | Tick a file's **Reviewed** box to fold it and mark it in the lists, and tick a chapter's **Reviewed** box to mark it ✓ in the strip |
 
@@ -80,6 +81,7 @@ flowchart TD
 - **The diff is never retyped.** Claude writes only the reading order and the prose, in `guide.json`. `scripts/render.mjs` draws every diff line from the patch itself, and refuses to build a page unless every change in the patch sits in exactly one chapter.
 - **Explain requests are pointers.** The page sends the session two short lines: the file and lines, and an id. The session reads the code itself and writes its progress and answer to the page's store, under that id. The page shows each step as it happens and types the answer out.
 - **Answers are pinned to file and line**, not to their place on the page, so they survive the page being rebuilt with chapters.
+- **Flags are checked against the patch.** The renderer refuses a flag that starts or ends off a changed line, spans two changes, or sits in a file tagged for less attention than the flag.
 - **Syntax colours** come from [highlight.js](https://highlightjs.org) 11.9.0, loaded from cdnjs, with a palette of the page's own in light and dark that stays clear of the diff's green and red. Each hunk is coloured as a whole, so comments and strings that span lines keep their colour. If the library can't load, the diff shows uncoloured.
 
 ## Files
@@ -87,7 +89,7 @@ flowchart TD
 | File | What it is |
 | --- | --- |
 | [`SKILL.md`](SKILL.md) | The instructions Claude follows |
-| [`scripts/render.mjs`](scripts/render.mjs) | Builds the page from `guide.json` and the patch. `--list` prints each file's hunks |
+| [`scripts/render.mjs`](scripts/render.mjs) | Builds the page from `guide.json` and the patch. `--list` prints each file's hunks; `--list <patch> <path>` prints a file's changed lines with their addresses |
 | [`test/harness.mjs`](test/harness.mjs) | Wraps a built page in a stand-in for the Artifact viewer, to test it in any browser |
 
 ### Testing the page without claude.ai

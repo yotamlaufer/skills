@@ -16,7 +16,8 @@
 // reads, with those buttons hidden.
 //
 // Usage: node render.mjs <guide.json> <patch.diff> <out.html>
-//        node render.mjs --list <patch.diff>   (each file's hunks, numbered as guide.json's "hunks" counts them)
+//        node render.mjs --list <patch.diff>          (each file's hunks, numbered as guide.json's "hunks" counts them)
+//        node render.mjs --list <patch.diff> <path>   (that file's changed lines, with the addresses flags take)
 
 import { readFileSync, writeFileSync } from 'node:fs'
 
@@ -125,6 +126,20 @@ function validate(guide, files) {
         if (seen.has(key)) errors.push(`hunk ${i} of "${ref.path}" is in both "${seen.get(key)}" and "${chapter.title}". Each hunk goes in one chapter.`)
         else seen.set(key, chapter.title)
       }
+      if (ref.flags !== undefined) {
+        if (!Array.isArray(ref.flags)) {
+          errors.push(`${where}: "${ref.path}" has "flags" that is not a list.`)
+          continue
+        }
+        ref.flags.forEach((flag, k) => {
+          const at = `${where}: "${ref.path}" flags[${k}]`
+          if (!FLAG_LEVELS.includes(flag?.level)) errors.push(`${at} has level "${flag?.level}"; use ${FLAG_LEVELS.join(' or ')}.`)
+          if (typeof flag?.note !== 'string' || flag.note.trim() === '') errors.push(`${at} has no "note".`)
+          const placed = placeFlag(ref, file, flag ?? {})
+          if (typeof placed === 'string') errors.push(`${at} ${placed}`)
+          if (FLAG_LEVELS.includes(flag?.level) && rank(ref.attention) > rank(flag.level)) errors.push(`${at} is a ${flag.level} flag, so the file's attention must be ${ATTENTION_ORDER.slice(0, rank(flag.level) + 1).map((l) => `"${l}"`).join(' or ')} (it is "${ref.attention ?? 'unset'}").`)
+        })
+      }
     }
   })
   for (const f of files) {
@@ -195,6 +210,54 @@ const KINDS = {
   generated: { label: 'Generated', meaning: 'Produced by a tool; review the tool, not the text' },
 }
 const ATTENTION_ORDER = ['high', 'medium', 'low']
+// Most demanding first; an unset attention ranks last.
+const rank = (level) => (ATTENTION_ORDER.includes(level) ? ATTENTION_ORDER.indexOf(level) : ATTENTION_ORDER.length)
+// A flag marks the lines a reviewer must stop at. No low flags: a flag on
+// everything means nothing.
+const FLAG_LEVELS = ['high', 'medium']
+
+// A diff row's address, the same one the page uses for answers: n12 is line
+// 12 of the new file, o10 removed line 10.
+function rowKeyOf(line) {
+  return line.newNo ? `n${line.newNo}` : `o${line.oldNo}`
+}
+
+// Where a flag sits in the hunks a chapter's reference shows: the keys of its
+// rows and the last of them, and its lines as a reader writes them ("12–14",
+// "10 (removed)"; `many` when more than one). Keys are unique within a file,
+// so they place it without its hunk. A string says why it cannot be placed.
+function placeFlag(ref, file, flag) {
+  const from = flag.from
+  const to = flag.to ?? flag.from
+  const keyForm = /^[no][1-9]\d*$/
+  if (!keyForm.test(String(from)) || !keyForm.test(String(to))) return `needs "from" (and "to") as line addresses like "n12" (new line 12) or "o10" (removed line 10).`
+  const shown = ref.hunks ?? [...Array(file.hunks.length).keys()]
+  for (const hi of shown) {
+    const lines = file.hunks[hi]?.lines ?? []
+    const keys = lines.map(rowKeyOf)
+    const a = keys.indexOf(from)
+    if (a === -1) continue
+    const b = keys.indexOf(to)
+    if (b === -1) return `runs from ${from} to ${to}, which are not in the same change. Flag each change on its own.`
+    if (b < a) return `runs from ${from} to ${to}, which is backwards: "from" is the first line.`
+    if (lines[a].kind === 'ctx' || lines[b].kind === 'ctx') return `starts or ends on an unchanged line (${lines[a].kind === 'ctx' ? from : to}). A flag starts and ends on changed lines.`
+    const rows = lines.slice(a, b + 1)
+    const news = rows.filter((l) => l.newNo).map((l) => l.newNo)
+    const nums = news.length > 0 ? news : rows.map((l) => l.oldNo)
+    const many = nums[0] !== nums[nums.length - 1]
+    const label = (many ? `${nums[0]}–${nums[nums.length - 1]}` : `${nums[0]}`) + (news.length > 0 ? '' : ' (removed)')
+    return { keys: new Set(keys.slice(a, b + 1)), last: keys[b], lines: label, many }
+  }
+  return `starts at ${from}, which is not a line of the changes this chapter shows. Run render.mjs --list to see each change's lines.`
+}
+
+// The most demanding level among some flags.
+const topLevel = (flags) => (flags.some((f) => f.level === 'high') ? 'high' : 'medium')
+
+function flagMark(flags) {
+  if (flags.length === 0) return ''
+  return `<span class="fl-flags fl-flags-${topLevel(flags)}" title="${flags.length} flagged ${flags.length === 1 ? 'place' : 'places'} to read closely">⚑ ${flags.length}</span>`
+}
 
 function attentionTag(level, small) {
   const a = ATTENTION[level]
@@ -239,6 +302,18 @@ function renderFile(ref, file, ci, fi, id = `f-${ci}-${fi}`) {
 
   // Line numbers and signs are drawn from data attributes (CSS ::before), so
   // copying code from the page copies the code alone.
+  // Flags (placed by renderPage): a bar beside their rows, and their note
+  // open under the last of them.
+  const flagClassOf = new Map() // row key → its bar's class
+  const calloutsAfter = new Map() // row key → the notes under it
+  for (const key of new Set((ref.placed ?? []).flatMap((f) => [...f.keys]))) {
+    flagClassOf.set(key, ` flag-${topLevel(ref.placed.filter((f) => f.keys.has(key)))}`)
+  }
+  for (const f of ref.placed ?? []) {
+    const note = `<div class="panel flag flag-${f.level}" id="${id}-flag-${f.k}"><div class="panel-head">${attentionTag(f.level, true)}<span class="panel-title">${esc(name)}:${esc(f.lines)}</span><button type="button" class="btn fold">Hide</button></div><p class="flag-note fold-body">${inlineText(f.note)}</p></div>`
+    calloutsAfter.set(f.last, (calloutsAfter.get(f.last) ?? '') + note)
+  }
+
   let body
   if (file.binary) body = '<p class="note">Binary file: no lines to show.</p>'
   else if (hunks.length === 0) body = '<p class="note">No line changes (mode or rename only).</p>'
@@ -250,7 +325,8 @@ function renderFile(ref, file, ci, fi, id = `f-${ci}-${fi}`) {
           .map((l) => {
             const sign = l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ''
             const label = l.newNo ? `line ${l.newNo}` : `removed line ${l.oldNo}`
-            return `<div class="row ${l.kind}" data-hunk="${hi}" data-o="${l.oldNo ?? ''}" data-n="${l.newNo ?? ''}"><span class="no" data-v="${l.oldNo ?? ''}" role="button" tabindex="-1" aria-label="Mark ${label}"></span><span class="no" data-v="${l.newNo ?? ''}" role="button" tabindex="0" aria-label="Mark ${label}"></span><span class="sign" data-v="${sign}"></span><span class="code">${esc(l.text)}\n</span></div>`
+            const key = rowKeyOf(l)
+            return `<div class="row ${l.kind}${flagClassOf.get(key) ?? ''}" data-key="${key}" data-hunk="${hi}" data-o="${l.oldNo ?? ''}" data-n="${l.newNo ?? ''}"><span class="no" data-v="${l.oldNo ?? ''}" role="button" tabindex="-1" aria-label="Mark ${label}"></span><span class="no" data-v="${l.newNo ?? ''}" role="button" tabindex="0" aria-label="Mark ${label}"></span><span class="sign" data-v="${sign}"></span><span class="code">${esc(l.text)}\n</span></div>${calloutsAfter.get(key) ?? ''}`
           })
           .join('')
         return head + lines
@@ -261,12 +337,8 @@ function renderFile(ref, file, ci, fi, id = `f-${ci}-${fi}`) {
 
   return `<details class="file" id="${id}" data-chapter="${ci}" data-file="${fi}" data-path="${esc(file.path)}"${ref.collapsed ? '' : ' open'}>
   <summary>
-    <span class="fname">${esc(name)}</span><span class="fdir">${esc(dir)}</span>
-    <span class="chip chip-${file.status}">${STATUS_LABEL[file.status]}</span>
-    ${attentionTag(ref.attention, false)}${kindTag(ref.kind)}
-    <span class="counts">${countsHtml(countsOf(ref, file))}</span>
-    ${rename}${part}
-    <label class="reviewed"><input type="checkbox" data-file-key="${esc(file.path)}">Reviewed</label>
+    <span class="tagline">${attentionTag(ref.attention, false)}<span class="chip chip-${file.status}">${STATUS_LABEL[file.status]}</span>${kindTag(ref.kind)}<span class="counts">${countsHtml(countsOf(ref, file))}</span>${rename}${part}<label class="reviewed"><input type="checkbox" data-file-key="${esc(file.path)}">Reviewed</label></span>
+    <span class="nameline"><span class="fname">${esc(name)}</span><span class="fdir">${esc(dir)}</span></span>
     ${ref.summary ? `<span class="summary">${esc(ref.summary)}</span>` : ''}
     ${ref.affects ? `<span class="affects"><strong>Affects</strong> ${esc(ref.affects)}</span>` : ''}
   </summary>
@@ -301,13 +373,25 @@ function renderPage(guide, files) {
     if (!placesOf.has(ref.path)) placesOf.set(ref.path, [])
     placesOf.get(ref.path).push([ci, fi])
   }))
-  const rank = (level) => (ATTENTION_ORDER.includes(level) ? ATTENTION_ORDER.indexOf(level) : ATTENTION_ORDER.length)
   // A file read in several chapters takes the tags of its most demanding part.
   const leadRefOf = (path) =>
     (placesOf.get(path) ?? []).map(([ci, fi]) => guide.chapters[ci].files[fi]).sort((a, b) => rank(a.attention) - rank(b.attention))[0] ?? { path }
   const byAttention = files
     .map((file, i) => ({ file, i, lead: leadRefOf(file.path) }))
     .sort((a, b) => rank(a.lead.attention) - rank(b.lead.attention) || a.i - b.i)
+  // ---- Flags: each placed in its chapter's hunks, numbered across the page,
+  // then kept most demanding first so every list below only filters.
+  const allFlags = []
+  guide.chapters.forEach((c, ci) => c.files.forEach((ref, fi) => {
+    for (const flag of ref.flags ?? []) {
+      allFlags.push({ ...placeFlag(ref, byPath.get(ref.path), flag), k: allFlags.length, ci, fi, path: ref.path, level: flag.level, note: flag.note })
+    }
+  }))
+  allFlags.sort((a, b) => rank(a.level) - rank(b.level) || a.k - b.k)
+  const flagsByPath = new Map(files.map((f) => [f.path, allFlags.filter((x) => x.path === f.path)]))
+  const flagsOfRef = (ci, fi) => allFlags.filter((f) => f.ci === ci && f.fi === fi)
+  const flagTarget = (f) => `f-${f.ci}-${f.fi}-flag-${f.k}`
+
   const tally = ATTENTION_ORDER.map((level) => [level, byAttention.filter((x) => x.lead.attention === level).length]).filter(([, n]) => n > 0)
   const tallyHtml = tally.map(([level, n]) => `<span class="tally">${attentionTag(level, true)} ${n}</span>`).join('')
   const kindTally = Object.keys(KINDS)
@@ -327,7 +411,7 @@ ${files
   .map((file, i) => {
     const lead = leadRefOf(file.path)
     const [ci, fi] = (placesOf.get(file.path) ?? [[0, 0]])[0]
-    const whole = { path: file.path, attention: lead.attention, kind: lead.kind, affects: lead.affects, summary: lead.summary, collapsed: lead.collapsed }
+    const whole = { path: file.path, attention: lead.attention, kind: lead.kind, affects: lead.affects, summary: lead.summary, collapsed: lead.collapsed, placed: flagsByPath.get(file.path) }
     return renderFile(whole, file, ci, fi, `ff-${i}`)
   })
   .join('\n')}
@@ -336,14 +420,19 @@ ${files
 </section>`
 
   // ---- Overview: the change as analysed from the code.
-  const highFiles = byAttention.filter((x) => x.lead.attention === 'high')
+  // Risks: every High file and every flagged file, its flags under it.
+  const riskFiles = byAttention.filter((x) => x.lead.attention === 'high' || flagsByPath.get(x.file.path).length > 0)
   const changesList = (guide.changes ?? [])
     .map((c) => `<li><span>${inlineText(c.text)}</span>${c.chapter ? `<a class="ov-ch" href="#guide-${c.chapter}">Chapter ${c.chapter} →</a>` : ''}</li>`)
     .join('')
   const risksList = [
-    ...highFiles.map(({ file, i, lead }) => {
+    ...riskFiles.map(({ file, i, lead }) => {
       const { name } = splitPath(file.path)
-      return `<li>${attentionTag('high', true)}<span><a class="ov-file" href="#files" data-goto="ff-${i}">${esc(name)}</a>${lead.affects ? ` ${esc(lead.affects)}` : ''}</span></li>`
+      const flags = flagsByPath.get(file.path)
+      const flagItems = flags.length
+        ? `<ul class="ov-flags">${flags.map((f) => `<li class="ov-flag-${f.level}"><a class="ov-flag" href="#guide-${f.ci + 1}" data-goto="${flagTarget(f)}">${f.many ? 'lines' : 'line'} ${esc(f.lines)}</a><span>${inlineText(f.note)}</span></li>`).join('')}</ul>`
+        : ''
+      return `<li>${attentionTag(lead.attention, true)}<span><a class="ov-file" href="#files" data-goto="ff-${i}">${esc(name)}</a>${lead.affects ? ` ${esc(lead.affects)}` : ''}${flagItems}</span></li>`
     }),
     ...(guide.risks ?? []).map((r) => `<li><span class="ov-dot" aria-hidden="true">•</span><span>${inlineText(r)}</span></li>`),
   ].join('')
@@ -358,13 +447,20 @@ ${files
     <section><h3 class="eyebrow">Files changed</h3><ul class="filelist">${byAttention
       .map(({ file, i, lead }) => {
         const chips = `<span class="fl-ch">${(placesOf.get(file.path) ?? []).map(([c]) => c + 1).join(', ')}</span>`
-        return fileListItem({ path: file.path, attention: lead.attention }, file, 0, 0, chips, `ff-${i}`)
+        return fileListItem({ path: file.path, attention: lead.attention }, file, 0, 0, flagMark(flagsByPath.get(file.path)) + chips, `ff-${i}`)
       })
       .join('')}</ul></section>
   </div>
 </section>`
 
   // ---- Guide: one chapter at a time, its words beside its diffs.
+  const chapterFlags = (ci) => {
+    const flags = allFlags.filter((f) => f.ci === ci)
+    if (flags.length === 0) return ''
+    return `<section class="ch-flags"><h3 class="eyebrow">Read closely</h3><ul class="ov-risks">${flags
+      .map((f) => `<li>${attentionTag(f.level, true)}<span><a class="ov-flag" href="#guide-${ci + 1}" data-goto="${flagTarget(f)}">${esc(splitPath(f.path).name)}:${esc(f.lines)}</a><span class="ch-flag-note">${inlineText(f.note)}</span></span></li>`)
+      .join('')}</ul></section>`
+  }
   const n = guide.chapters.length
   const guideView = guide.firstPage
     ? ''
@@ -379,12 +475,13 @@ ${guide.chapters
     <div class="ch-count"><span>${pad(i + 1)} / ${pad(n)}</span><label class="ch-done"><input type="checkbox" data-chapter="${i + 1}">Reviewed</label></div>
     <h2 id="h-${i + 1}">${esc(c.title)}</h2>
     <div class="overview">${prose(c.overview)}</div>
-    <ul class="filelist">${c.files.map((ref, fi) => fileListItem(ref, byPath.get(ref.path), i, fi)).join('')}</ul>
+    ${chapterFlags(i)}
+    <ul class="filelist">${c.files.map((ref, fi) => fileListItem(ref, byPath.get(ref.path), i, fi, flagMark(flagsOfRef(i, fi)))).join('')}</ul>
     <div class="ch-nav">${i > 0 ? `<a class="btn" href="#guide-${i}">← Previous</a>` : ''}${i < n - 1 ? `<a class="btn" href="#guide-${i + 2}">Next →</a>` : ''}</div>
     ${howto}
   </aside>
   <div class="ch-files">
-${c.files.map((ref, fi) => renderFile(ref, byPath.get(ref.path), i, fi)).join('\n')}
+${c.files.map((ref, fi) => renderFile({ ...ref, placed: flagsOfRef(i, fi) }, byPath.get(ref.path), i, fi)).join('\n')}
   </div>
 </section>`,
   )
@@ -469,7 +566,7 @@ code { font-family: var(--mono); font-size: .88em; background: var(--accent-soft
 .ov-ch { margin-left: 10px; font-size: 13px; color: var(--accent); white-space: nowrap; text-decoration: none; }
 .ov-ch:hover { text-decoration: underline; }
 .ov-risks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.ov-risks li { display: grid; grid-template-columns: 5.2em minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.ov-risks > li { display: grid; grid-template-columns: 5.2em minmax(0, 1fr); gap: 10px; align-items: baseline; }
 .ov-dot { color: var(--muted); text-align: center; }
 .ov-file { font: 500 13px var(--mono); color: var(--accent); text-decoration: none; margin-right: 6px; }
 .glance { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 14px; color: var(--muted); }
@@ -504,6 +601,9 @@ details.file > summary::-webkit-details-marker { display: none; }
 details.file > summary::before { content: "▸"; color: var(--muted); font-size: 11px; transition: transform .15s; }
 details.file[open] > summary::before { transform: rotate(90deg); }
 details.file[open] > summary { border-bottom: 1px solid var(--line); }
+/* The header: tags first, on the left where the eye starts, then the file's name under them. */
+.tagline { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.nameline { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; padding-left: 18px; min-width: 0; }
 .fname { font: 500 13.5px var(--mono); color: var(--accent); }
 .fdir { font: 12.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 .reviewed { margin-left: auto; display: flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); cursor: pointer; }
@@ -562,10 +662,32 @@ details.file.is-reviewed > summary .fname { color: var(--muted); }
 .code .hljs-strong { font-weight: 600; }
 .row.add { background: var(--add-bg); } .row.add .no { background: var(--add-no); } .row.add .sign { color: var(--add-fg); }
 .row.del { background: var(--del-bg); } .row.del .no { background: var(--del-no); } .row.del .sign { color: var(--del-fg); }
-.row.marked { background: var(--mark-bg); box-shadow: inset 3px 0 0 var(--mark-edge); }
+/* The gutter bar: on the first line-number cell, so the cell's own shade can't cover it.
+   A flag colours it by level; marking, last, wins. */
+.row > .no:first-child { box-shadow: inset 4px 0 0 var(--row-edge, transparent); }
+.row.flag-medium { --row-edge: var(--att-med); }
+.row.flag-high { --row-edge: var(--att-high); }
+.row.marked { background: var(--mark-bg); --row-edge: var(--mark-edge); }
 .row.marked .no { background: var(--mark-no); color: var(--fg); }
 .hunk { display: flex; gap: 12px; align-items: center; background: var(--hunk-bg); color: var(--hunk-fg); padding: 3px 8px 3px calc(7.2em + 8px); min-height: 28px; }
 .hunk-text { white-space: pre; }
+
+/* A flag's note: open under its lines, edged in its level's colour. */
+.panel.flag { gap: 6px; border-left: 3px solid var(--att-high); }
+.panel.flag-medium { border-left-color: var(--att-med); }
+.flag-note { margin: 0; max-width: 75ch; }
+.ov-flags { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.ov-flags li { padding-left: 10px; border-left: 2px solid var(--att-high); }
+.ov-flags li.ov-flag-medium { border-left-color: var(--att-med); }
+.ov-flag { font: 500 13px var(--mono); color: var(--accent); text-decoration: none; white-space: nowrap; margin-right: 8px; }
+.ov-flag:hover, .ov-file:hover { text-decoration: underline; }
+.ch-flags .ov-risks { margin-top: 6px; gap: 8px; }
+.ch-flags li > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ch-flags .ov-flag { overflow: hidden; text-overflow: ellipsis; }
+.ch-flag-note { font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.fl-flags { font: 600 11px var(--mono); margin-right: 10px; white-space: nowrap; }
+.fl-flags-high { color: var(--att-high); }
+.fl-flags-medium { color: var(--att-med); }
 
 /* Panels that open under lines: as wide as the visible card, pinned left while the code scrolls. */
 .panel { position: sticky; left: 0; box-sizing: border-box; font: 14px/1.55 var(--sans); background: var(--surface); border-block: 1px solid var(--line); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px; white-space: normal; }
@@ -888,12 +1010,18 @@ ${filesView}
     if (no && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); markThrough(no.closest('.row'), ev.shiftKey); }
   });
 
-  // A panel is as wide as the visible card and stays put while the code scrolls sideways.
-  const sizePanel = (panel) => {
-    const diff = panel.closest('.diff');
-    if (diff) panel.style.width = diff.clientWidth + 'px';
+  // A panel is as wide as the visible card and stays put while the code scrolls
+  // sideways. Every width is read before any is written, so the page lays out
+  // once however many panels there are; a hidden card (width 0) keeps its own.
+  const sizePanels = (list) => {
+    const ps = [...list];
+    const widths = ps.map((p) => { const d = p.closest('.diff'); return d ? d.clientWidth : 0; });
+    ps.forEach((p, i) => { if (widths[i]) p.style.width = widths[i] + 'px'; });
   };
-  window.addEventListener('resize', () => { for (const p of document.querySelectorAll('.panel')) sizePanel(p); });
+  const sizePanel = (panel) => sizePanels([panel]);
+  const sizeShownPanels = () => sizePanels(document.querySelectorAll('.view:not([hidden]) .panel'));
+  let resizeTimer = 0;
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(sizeShownPanels, 100); });
 
   // ---- Views: #overview, #guide (#guide-N for a chapter) and #files.
   const DEFAULT_VIEW = ${JSON.stringify(defaultView)};
@@ -924,22 +1052,38 @@ ${filesView}
     }
     if (viewChanged || chapterChanged) window.scrollTo(0, 0);
     // A panel drawn while its view was hidden measured no width.
-    for (const p of document.querySelectorAll('.view:not([hidden]) .panel')) sizePanel(p);
+    sizeShownPanels();
   }
-  // A link with data-goto names a file element: show its view (and chapter),
-  // open the file and bring it into view.
+  // A panel that folds has a .fold button in its head and a .fold-body:
+  // Hide folds it to its head, Show opens it again.
+  function setFolded(panel, folded) {
+    const body = panel.querySelector('.fold-body');
+    const b = panel.querySelector('.fold');
+    if (body) body.hidden = folded;
+    if (b) b.textContent = folded ? 'Show' : 'Hide';
+  }
+  // A link with data-goto names a file or a flag: show its view (and
+  // chapter), open its file, unfold it and bring it into view.
   function goTo(id) {
     const target = document.getElementById(id);
     if (!target) return;
+    const file = target.closest('details.file');
+    if (file) file.open = true;
+    if (target.classList.contains('panel')) setFolded(target, false);
     const page = target.closest('.chapter-page');
     const view = target.closest('.view');
     const hash = page ? '#guide-' + page.dataset.ch : '#' + view.id.slice(5);
     if (location.hash !== hash) history.pushState(null, '', hash);
     route();
-    if (target.tagName === 'DETAILS') target.open = true;
-    target.scrollIntoView({ block: 'start' });
+    target.scrollIntoView({ block: target === file ? 'start' : 'center' });
   }
   document.addEventListener('click', (ev) => {
+    const fold = ev.target.closest('.panel .fold');
+    if (fold) {
+      const panel = fold.closest('.panel');
+      setFolded(panel, !panel.querySelector('.fold-body').hidden);
+      return;
+    }
     const a = ev.target.closest('[data-goto]');
     if (!a) return;
     ev.preventDefault();
@@ -972,8 +1116,7 @@ ${filesView}
     const actions = el('div', 'actions');
     head.append(actions);
     bar.append(head);
-    last.after(bar);
-    sizePanel(bar);
+    placeUnder(last, bar);
     refreshBar();
   }
 
@@ -1010,18 +1153,23 @@ ${filesView}
     const head = el('div', 'panel-head');
     head.append(el('span', 'panel-title', title), button('Close', '', () => panel.remove()));
     panel.append(head, el('div', isError ? 'status error' : 'status', message));
-    after.after(panel);
+    placeUnder(after, panel);
+  }
+
+  // A panel goes under its lines, after any flag notes there: a flag's note
+  // stays right under the lines it is about.
+  function placeUnder(at, panel) {
+    while (at.nextElementSibling && at.nextElementSibling.classList.contains('flag')) at = at.nextElementSibling;
+    at.after(panel);
     sizePanel(panel);
   }
 
   function makePanel(id, title, afterEl, open, row = afterEl) {
     const panel = el('div', 'panel explain');
     const head = el('div', 'panel-head');
-    const body = el('div', 'explain-body');
-    const toggle = button(open ? 'Hide' : 'Show', '', () => {
-      body.hidden = !body.hidden;
-      toggle.textContent = body.hidden ? 'Show' : 'Hide';
-    });
+    const body = el('div', 'explain-body fold-body');
+    const toggle = el('button', 'btn fold', open ? 'Hide' : 'Show');
+    toggle.type = 'button';
     head.append(el('span', 'panel-title', title), toggle);
     const steps = el('ol', 'steps');
     const answer = el('div', 'answer');
@@ -1030,8 +1178,7 @@ ${filesView}
     body.append(steps, answer, status);
     body.hidden = !open;
     panel.append(head, body);
-    afterEl.after(panel);
-    sizePanel(panel);
+    placeUnder(afterEl, panel);
     const p = { panel, row, steps, answer, status, state: 'pending', target: '', shown: 0, drawn: -1, drawnState: '', instant: false };
     if (!panels.has(id)) panels.set(id, []);
     panels.get(id).push(p);
@@ -1110,7 +1257,7 @@ ${filesView}
   // An answer is pinned to its file and lines (\`n12\` a line of the new file,
   // \`o10\` a removed one), so it stays put when the chapters are rewritten.
   // Answers written before carry a chapter, file and row position instead.
-  const rowKey = (row) => (row.dataset.n ? 'n' + row.dataset.n : 'o' + row.dataset.o);
+  const rowKey = (row) => row.dataset.key; // written by render.mjs's rowKeyOf
   // Every row the answer belongs under: a line shows in the Guide and in Files.
   function rowsFor(d) {
     if (typeof d.to === 'string' && typeof d.path === 'string') {
@@ -1275,10 +1422,27 @@ ${filesView}
 
 if (process.argv[2] === '--list') {
   if (!process.argv[3]) {
-    console.error('Usage: node render.mjs --list <patch.diff>')
+    console.error('Usage: node render.mjs --list <patch.diff> [path]')
     process.exit(2)
   }
-  for (const f of parsePatch(readFileSync(process.argv[3], 'utf8'))) {
+  const listed = parsePatch(readFileSync(process.argv[3], 'utf8'))
+  // With a path: that file's changed lines, each with the address a flag's
+  // "from" and "to" take.
+  const only = process.argv[4]
+  if (only) {
+    const f = listed.find((x) => x.path === only || x.path.endsWith('/' + only))
+    if (!f) {
+      console.error(`"${only}" is not in the patch.`)
+      process.exit(1)
+    }
+    console.log(f.path)
+    f.hunks.forEach((h, i) => {
+      console.log(`  ${i}: ${h.header}`)
+      for (const l of h.lines) if (l.kind !== 'ctx') console.log(`    ${rowKeyOf(l).padEnd(6)} ${l.kind === 'add' ? '+' : '-'} ${l.text.slice(0, 120)}`)
+    })
+    process.exit(0)
+  }
+  for (const f of listed) {
     console.log(`${f.path}  (${f.status}, +${f.additions} −${f.deletions}${f.binary ? ', binary' : ''})`)
     f.hunks.forEach((h, i) => {
       const adds = h.lines.filter((l) => l.kind === 'add').length
@@ -1294,7 +1458,7 @@ if (process.argv[2] === '--list') {
 
 const [guidePath, patchPath, outPath] = process.argv.slice(2)
 if (!guidePath || !patchPath || !outPath) {
-  console.error('Usage: node render.mjs <guide.json> <patch.diff> <out.html>\n       node render.mjs --list <patch.diff>')
+  console.error('Usage: node render.mjs <guide.json> <patch.diff> <out.html>\n       node render.mjs --list <patch.diff> [path]')
   process.exit(2)
 }
 
